@@ -1,0 +1,64 @@
+import anthropic
+
+client = anthropic.Anthropic()
+
+tools = [
+    {
+        "name": "calculate",
+        "description": "Evaluate a math expression",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "Math expression to evaluate"}
+            },
+            "required": ["expression"]
+        }
+    }
+]
+
+def execute_tool(name, input):
+    if name == "calculate":
+        return str(eval(input["expression"]))
+    return "Unknown tool"
+
+def run_agent(goal):
+    messages = [{"role": "user", "content": goal}]
+    system = "You are an agent. Use tools to accomplish the user's goal. When done, say DONE."
+
+    while True:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            system=system,
+            tools=tools,
+            messages=messages
+        )
+
+        # Check if the model wants to use a tool
+        if response.stop_reason == "tool_use":
+            # Find the tool use block
+            tool_block = next(b for b in response.content if b.type == "tool_use")
+            print(f"→ Using {tool_block.name}({tool_block.input})")
+
+            result = execute_tool(tool_block.name, tool_block.input)
+            print(f"← Result: {result}")
+
+            # Feed the result back
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": tool_block.id, "content": result}
+                ]
+            })
+        else:
+            # Model responded with text — print and check if done
+            text = next((b.text for b in response.content if b.type == "text"), "")
+            print(f"Agent: {text}")
+            if "DONE" in text:
+                break
+            # If not done, keep going
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": "Continue."})
+
+run_agent("What is (17 * 38) + (92 / 4)?")

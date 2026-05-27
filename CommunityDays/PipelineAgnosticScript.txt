@@ -1,0 +1,542 @@
+#!/usr/bin/env python3
+"""
+ci_agent.py — A minimal, provider-agnostic AI agent for CI/CD pipelines.
+
+Works with: GitHub Actions, Azure DevOps, TeamCity, Jenkins, GitLab CI,
+or anything that can run `python ci_agent.py "do the thing"`.
+
+Talks to any OpenAI-compatible API (Anthropic, OpenAI, Ollama, Together,
+OpenRouter, Azure OpenAI, LM Studio, vLLM, etc.)
+
+Environment Variables:
+    Required:
+        AGENT_GOAL          - What you want the agent to do (or pass as CLI arg)
+    
+    Optional:
+        LLM_BASE_URL        - API endpoint (default: https://api.anthropic.com/v1)
+        LLM_API_KEY         - API key (reads ANTHROPIC_API_KEY or OPENAI_API_KEY as fallback)
+        LLM_MODEL           - Model name (default: claude-sonnet-4-20250514)
+        LLM_PROVIDER        - "anthropic" or "openai" (default: auto-detect from URL)
+        AGENT_MAX_STEPS     - Max tool-use iterations (default: 20)
+        AGENT_WORKDIR       - Working directory for commands (default: current dir)
+        AGENT_ALLOWED_TOOLS - Comma-separated tool list (default: all)
+        AGENT_DRY_RUN       - Set to "true" to print actions without executing
+        AGENT_VERBOSE       - Set to "true" for full debug output
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+try:
+    import requests
+except ImportError:
+    print("ERROR: 'requests' not installed. Run: pip install requests", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+class Config:
+    def __init__(self):
+        self.base_url = os.environ.get("LLM_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
+        self.api_key = (
+            os.environ.get("LLM_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        )
+        self.model = os.environ.get("LLM_MODEL", "claude-sonnet-4-20250514")
+        self.provider = os.environ.get("LLM_PROVIDER", self._detect_provider())
+        self.max_steps = int(os.environ.get("AGENT_MAX_STEPS", "20"))
+        self.workdir = os.environ.get("AGENT_WORKDIR", os.getcwd())
+        self.allowed_tools = self._parse_allowed_tools()
+        self.dry_run = os.environ.get("AGENT_DRY_RUN", "false").lower() == "true"
+        self.verbose = os.environ.get("AGENT_VERBOSE", "false").lower() == "true"
+
+    def _detect_provider(self) -> str:
+        if "anthropic" in self.base_url:
+            return "anthropic"
+        return "openai"
+
+    def _parse_allowed_tools(self) -> set | None:
+        raw = os.environ.get("AGENT_ALLOWED_TOOLS")
+        if not raw:
+            return None  # all tools allowed
+        return {t.strip() for t in raw.split(",")}
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+TOOL_DEFINITIONS = {
+    "shell": {
+        "description": (
+            "Run a shell command. Use for: git operations, builds, tests, "
+            "linting, file manipulation, package management, deployments. "
+            "Commands run in the agent's working directory."
+        ),
+        "parameters": {
+            "command": {"type": "string", "description": "Shell command to execute"}
+        },
+        "required": ["command"]
+    },
+    "read_file": {
+        "description": "Read a file's contents. Use to inspect source, configs, logs, etc.",
+        "parameters": {
+            "path": {"type": "string", "description": "File path (relative to workdir)"}
+        },
+        "required": ["path"]
+    },
+    "write_file": {
+        "description": "Write content to a file. Creates parent directories if needed.",
+        "parameters": {
+            "path": {"type": "string", "description": "File path (relative to workdir)"},
+            "content": {"type": "string", "description": "Full file content to write"}
+        },
+        "required": ["path", "content"]
+    },
+    "patch_file": {
+        "description": (
+            "Replace a specific string in a file. The old_str must appear exactly "
+            "once. Use read_file first to see the current content."
+        ),
+        "parameters": {
+            "path": {"type": "string", "description": "File path"},
+            "old_str": {"type": "string", "description": "Exact string to find (must be unique)"},
+            "new_str": {"type": "string", "description": "Replacement string"}
+        },
+        "required": ["path", "old_str", "new_str"]
+    },
+    "list_files": {
+        "description": "List files and directories. Useful for orientation.",
+        "parameters": {
+            "path": {"type": "string", "description": "Directory path (default: .)"},
+            "pattern": {"type": "string", "description": "Glob pattern (default: *)"}
+        },
+        "required": []
+    },
+    "done": {
+        "description": (
+            "Signal that the task is complete. Provide a summary and "
+            "exit_code (0 = success, non-zero = failure)."
+        ),
+        "parameters": {
+            "summary": {"type": "string", "description": "What was accomplished or why it failed"},
+            "exit_code": {"type": "integer", "description": "0 for success, 1+ for failure"}
+        },
+        "required": ["summary", "exit_code"]
+    }
+}
+
+
+def execute_tool(name: str, inputs: dict, config: Config) -> str:
+    """Execute a tool and return the result as a string."""
+    workdir = config.workdir
+
+    if name == "shell":
+        cmd = inputs["command"]
+        if config.dry_run:
+            return f"[DRY RUN] Would execute: {cmd}"
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            cwd=workdir, timeout=300
+        )
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            output += f"\n[stderr]\n{result.stderr}"
+        output += f"\n[exit_code: {result.returncode}]"
+        return output.strip()
+
+    elif name == "read_file":
+        p = Path(workdir) / inputs["path"]
+        if not p.exists():
+            return f"Error: {inputs['path']} not found"
+        content = p.read_text(errors="replace")
+        # Truncate huge files
+        if len(content) > 50_000:
+            return content[:25_000] + "\n\n... [truncated] ...\n\n" + content[-25_000:]
+        return content
+
+    elif name == "write_file":
+        if config.dry_run:
+            return f"[DRY RUN] Would write {len(inputs['content'])} chars to {inputs['path']}"
+        p = Path(workdir) / inputs["path"]
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(inputs["content"])
+        return f"Written: {inputs['path']} ({len(inputs['content'])} chars)"
+
+    elif name == "patch_file":
+        p = Path(workdir) / inputs["path"]
+        if not p.exists():
+            return f"Error: {inputs['path']} not found"
+        content = p.read_text()
+        count = content.count(inputs["old_str"])
+        if count == 0:
+            return "Error: old_str not found in file"
+        if count > 1:
+            return f"Error: old_str appears {count} times (must be unique)"
+        if config.dry_run:
+            return f"[DRY RUN] Would patch {inputs['path']}"
+        new_content = content.replace(inputs["old_str"], inputs["new_str"], 1)
+        p.write_text(new_content)
+        return f"Patched: {inputs['path']}"
+
+    elif name == "list_files":
+        target = Path(workdir) / inputs.get("path", ".")
+        pattern = inputs.get("pattern", "*")
+        if not target.exists():
+            return f"Error: {target} not found"
+        entries = sorted(target.glob(pattern))[:100]
+        return "\n".join(
+            f"{'[dir]  ' if e.is_dir() else '[file] '}{e.relative_to(workdir)}"
+            for e in entries
+        ) or "(empty)"
+
+    return f"Error: unknown tool '{name}'"
+
+
+# ---------------------------------------------------------------------------
+# LLM Clients (Anthropic native + OpenAI-compatible)
+# ---------------------------------------------------------------------------
+
+def _build_tool_schemas(config: Config) -> list[dict]:
+    """Build tool schemas filtered by allowed_tools."""
+    tools = []
+    for name, defn in TOOL_DEFINITIONS.items():
+        if config.allowed_tools and name not in config.allowed_tools:
+            if name != "done":  # always include done
+                continue
+        tools.append({
+            "name": name,
+            "description": defn["description"],
+            "input_schema": {
+                "type": "object",
+                "properties": defn["parameters"],
+                "required": defn.get("required", [])
+            }
+        })
+    return tools
+
+
+SYSTEM_PROMPT = """You are a CI/CD agent running inside a pipeline. Your job is to accomplish
+the given task by using the tools available to you.
+
+Rules:
+- Use one tool at a time. Observe the result before deciding your next action.
+- When done, ALWAYS call the "done" tool with a summary and exit_code.
+- If something fails after reasonable retries, call "done" with exit_code=1.
+- Be efficient. Don't read files you don't need.
+- Shell commands time out after 5 minutes.
+- You are in a CI environment. There is no human to ask for input."""
+
+
+def call_anthropic(messages: list, config: Config) -> dict:
+    """Call the Anthropic Messages API natively (supports tool_use stop_reason)."""
+    headers = {
+        "x-api-key": config.api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+    }
+    body = {
+        "model": config.model,
+        "max_tokens": 4096,
+        "system": SYSTEM_PROMPT,
+        "tools": _build_tool_schemas(config),
+        "messages": messages
+    }
+    resp = requests.post(f"{config.base_url}/messages", headers=headers, json=body, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def call_openai_compatible(messages: list, config: Config) -> dict:
+    """Call any OpenAI-compatible API and normalize the response to Anthropic shape."""
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json"
+    }
+    # Convert Anthropic tool schema to OpenAI function schema
+    oai_tools = []
+    for t in _build_tool_schemas(config):
+        oai_tools.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"]
+            }
+        })
+
+    oai_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for m in messages:
+        oai_messages.append(_to_openai_message(m))
+
+    body = {
+        "model": config.model,
+        "messages": oai_messages,
+        "tools": oai_tools,
+        "temperature": 0,
+        "max_tokens": 4096
+    }
+    resp = requests.post(f"{config.base_url}/chat/completions", headers=headers, json=body, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+    return _normalize_openai_response(data)
+
+
+def _to_openai_message(msg: dict) -> dict:
+    """Convert an Anthropic-shaped message to OpenAI format."""
+    role = msg["role"]
+    content = msg.get("content")
+
+    if role == "user" and isinstance(content, list):
+        # Could be a tool_result
+        for block in content:
+            if block.get("type") == "tool_result":
+                return {
+                    "role": "tool",
+                    "tool_call_id": block["tool_use_id"],
+                    "content": block.get("content", "")
+                }
+        # Otherwise join text blocks
+        return {"role": "user", "content": " ".join(
+            b.get("text", "") for b in content if b.get("type") == "text"
+        )}
+
+    if role == "assistant" and isinstance(content, list):
+        text_parts = []
+        tool_calls = []
+        for block in content:
+            if block.get("type") == "text":
+                text_parts.append(block["text"])
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": block["id"],
+                    "type": "function",
+                    "function": {
+                        "name": block["name"],
+                        "arguments": json.dumps(block["input"])
+                    }
+                })
+        result = {"role": "assistant", "content": " ".join(text_parts) or None}
+        if tool_calls:
+            result["tool_calls"] = tool_calls
+        return result
+
+    return {"role": role, "content": content if isinstance(content, str) else ""}
+
+
+def _normalize_openai_response(data: dict) -> dict:
+    """Convert an OpenAI response to Anthropic message shape."""
+    choice = data["choices"][0]
+    msg = choice["message"]
+    content_blocks = []
+
+    if msg.get("content"):
+        content_blocks.append({"type": "text", "text": msg["content"]})
+
+    tool_calls = msg.get("tool_calls") or []
+    stop_reason = "tool_use" if tool_calls else "end_turn"
+
+    for tc in tool_calls:
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except json.JSONDecodeError:
+            args = {}
+        content_blocks.append({
+            "type": "tool_use",
+            "id": tc["id"],
+            "name": tc["function"]["name"],
+            "input": args
+        })
+
+    return {"content": content_blocks, "stop_reason": stop_reason}
+
+
+# ---------------------------------------------------------------------------
+# Agent Loop
+# ---------------------------------------------------------------------------
+
+def log(msg: str, config: Config, level: str = "info"):
+    """CI-friendly logging with markers for GitHub Actions / Azure DevOps."""
+    prefix = {
+        "info": "::notice::" if os.environ.get("GITHUB_ACTIONS") else "",
+        "warn": "::warning::" if os.environ.get("GITHUB_ACTIONS") else "WARNING: ",
+        "error": "::error::" if os.environ.get("GITHUB_ACTIONS") else "ERROR: ",
+        "group_start": f"::group::{msg}" if os.environ.get("GITHUB_ACTIONS") else f"--- {msg} ---",
+        "group_end": "::endgroup::" if os.environ.get("GITHUB_ACTIONS") else "",
+    }
+    if level in ("group_start", "group_end"):
+        print(prefix[level])
+    else:
+        print(f"{prefix.get(level, '')}{msg}")
+
+
+def run_agent(goal: str, config: Config) -> int:
+    """Run the agent loop. Returns the exit code."""
+    log(f"Agent starting | model={config.model} | provider={config.provider}", config)
+    log(f"Goal: {goal}", config)
+    if config.dry_run:
+        log("DRY RUN MODE - no writes or shell commands will execute", config, "warn")
+
+    call_llm = call_anthropic if config.provider == "anthropic" else call_openai_compatible
+    messages = [{"role": "user", "content": goal}]
+
+    for step in range(1, config.max_steps + 1):
+        log(f"Step {step}/{config.max_steps}", config, "group_start")
+
+        try:
+            response = call_llm(messages, config)
+        except requests.exceptions.HTTPError as e:
+            log(f"LLM API error: {e}", config, "error")
+            if hasattr(e, "response") and e.response is not None:
+                log(e.response.text[:500], config, "error")
+            return 1
+        except Exception as e:
+            log(f"LLM call failed: {e}", config, "error")
+            return 1
+
+        # Process response blocks
+        tool_block = None
+        text_parts = []
+
+        for block in response.get("content", []):
+            if block.get("type") == "text" and block.get("text"):
+                text_parts.append(block["text"])
+            elif block.get("type") == "tool_use":
+                tool_block = block
+
+        if text_parts and config.verbose:
+            log(f"Thinking: {' '.join(text_parts)[:300]}", config)
+
+        if tool_block is None:
+            log("Model stopped without calling 'done'. Treating as failure.", config, "warn")
+            log("", config, "group_end")
+            return 1
+
+        tool_name = tool_block["name"]
+        tool_input = tool_block.get("input", {})
+
+        # Handle the "done" tool
+        if tool_name == "done":
+            summary = tool_input.get("summary", "(no summary)")
+            exit_code = int(tool_input.get("exit_code", 0))
+            log(f"Agent finished (exit {exit_code}): {summary}", config,
+                "info" if exit_code == 0 else "error")
+            log("", config, "group_end")
+            return exit_code
+
+        # Execute the tool
+        log(f"Tool: {tool_name} | Input: {json.dumps(tool_input)[:200]}", config)
+
+        if config.allowed_tools and tool_name not in config.allowed_tools:
+            result = f"Error: tool '{tool_name}' is not in AGENT_ALLOWED_TOOLS"
+        else:
+            try:
+                result = execute_tool(tool_name, tool_input, config)
+            except subprocess.TimeoutExpired:
+                result = "Error: command timed out after 300 seconds"
+            except Exception as e:
+                result = f"Error: {type(e).__name__}: {e}"
+
+        # Truncate huge results
+        if len(result) > 30_000:
+            result = result[:15_000] + "\n\n...[truncated]...\n\n" + result[-15_000:]
+
+        if config.verbose:
+            log(f"Result: {result[:300]}", config)
+
+        log("", config, "group_end")
+
+        # Append to conversation
+        messages.append({"role": "assistant", "content": response["content"]})
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": tool_block["id"], "content": result}
+            ]
+        })
+
+    log(f"Hit max steps ({config.max_steps}) without completion", config, "error")
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="CI/CD AI Agent - runs in any pipeline",
+        epilog="Set LLM_BASE_URL, LLM_API_KEY, LLM_MODEL to configure the provider."
+    )
+    parser.add_argument("goal", nargs="?", help="What the agent should do")
+    parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show full debug output")
+    parser.add_argument("--max-steps", type=int, help="Override max steps")
+    args = parser.parse_args()
+
+    goal = args.goal or os.environ.get("AGENT_GOAL")
+    if not goal:
+        parser.error("Provide a goal as a CLI argument or set AGENT_GOAL env var")
+
+    config = Config()
+    if args.dry_run:
+        config.dry_run = True
+    if args.verbose:
+        config.verbose = True
+    if args.max_steps:
+        config.max_steps = args.max_steps
+
+    exit_code = run_agent(goal, config)
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
+    
+    
+    
+    
+    GITHUB ACTIONS
+    - name: Run AI Agent
+  env:
+    LLM_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  run: |
+    pip install requests
+    python ci_agent.py "Run the test suite and fix any failing tests"
+    
+    AZURE DEVOPS
+    - script: |
+    pip install requests
+    python ci_agent.py "Validate the ARM templates and summarize any issues"
+  env:
+    LLM_API_KEY: $(ANTHROPIC_API_KEY)
+    
+    JENKINS
+    stage('AI Agent') {
+    steps {
+        withCredentials([string(credentialsId: 'llm-key', variable: 'LLM_API_KEY')]) {
+            sh 'pip install requests && python ci_agent.py "Check for security vulnerabilities in deps"'
+        }
+    }
+}
+
+    TEAM CITY
+    Command Line runner:
+    pip install requests
+    python ci_agent.py "Run linting and auto-fix style issues"
+
+    Environment variable: LLM_API_KEY = %teamcity.llm.api.key%
