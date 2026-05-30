@@ -1,0 +1,108 @@
+import requests
+import json
+
+# --- CONFIG: point at any OpenAI-compatible endpoint ---
+BASE_URL = "http://localhost:11434/v1"  # Ollama default
+MODEL = "llama3"
+API_KEY = "not-needed"  # Ollama doesn't require one
+
+# --- TOOLS ---
+TOOLS = {
+    "calculate": {
+        "description": "Evaluate a math expression. Input: {\"expression\": \"2+2\"}",
+        "fn": lambda input: str(eval(input["expression"]))
+    },
+    "read_file": {
+        "description": "Read a file. Input: {\"path\": \"somefile.txt\"}",
+        "fn": lambda input: open(input["path"]).read()
+    },
+    "write_file": {
+        "description": "Write content to a file. Input: {\"path\": \"out.txt\", \"content\": \"hello\"}",
+        "fn": lambda input: (open(input["path"], "w").write(input["content"]), "written")[1]
+    },
+    "shell": {
+        "description": "Run a shell command. Input: {\"command\": \"ls -la\"}",
+        "fn": lambda input: __import__("subprocess").run(
+            input["command"], shell=True, capture_output=True, text=True
+        ).stdout or "no output"
+    }
+}
+
+SYSTEM = f"""You are an autonomous agent. You have these tools:
+{json.dumps({k: v["description"] for k, v in TOOLS.items()}, indent=2)}
+
+To use a tool, respond with EXACTLY this JSON and nothing else:
+{{"tool": "tool_name", "input": {{...}}}}
+
+To give a final answer, respond with:
+{{"done": true, "answer": "your final answer"}}
+
+Think step by step. Use one tool at a time."""
+
+def call_llm(messages):
+    resp = requests.post(
+        f"{BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+        json={"model": MODEL, "messages": messages, "temperature": 0}
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+def parse_action(text):
+    """Try to extract a JSON action from the model's response."""
+    # Find the first { and last } to handle models that wrap JSON in prose
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None
+    try:
+        return json.loads(text[start:end])
+    except json.JSONDecodeError:
+        return None
+
+def run_agent(goal, max_steps=10):
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": goal}
+    ]
+
+    for step in range(max_steps):
+        print(f"\n--- Step {step + 1} ---")
+        raw = call_llm(messages)
+        print(f"Model: {raw[:200]}")
+
+        action = parse_action(raw)
+
+        if action is None:
+            print("⚠ No parseable action, nudging...")
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content": "Respond with a JSON tool call or a JSON done message."})
+            continue
+
+        if action.get("done"):
+            print(f"\n✅ Done: {action['answer']}")
+            return action["answer"]
+
+        tool_name = action.get("tool")
+        tool_input = action.get("input", {})
+
+        if tool_name not in TOOLS:
+            result = f"Error: unknown tool '{tool_name}'"
+        else:
+            try:
+                result = TOOLS[tool_name]["fn"](tool_input)
+            except Exception as e:
+                result = f"Error: {e}"
+
+        print(f"→ {tool_name}({tool_input})")
+        print(f"← {result[:200]}")
+
+        messages.append({"role": "assistant", "content": raw})
+        messages.append({"role": "user", "content": f"Tool result:\n{result}\n\nContinue."})
+
+    print("\n⚠ Hit max steps")
+    return None
+
+
+if __name__ == "__main__":
+    run_agent("List the files in the current directory and tell me how many there are.")

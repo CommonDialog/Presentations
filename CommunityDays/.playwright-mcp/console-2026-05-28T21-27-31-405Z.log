@@ -1,0 +1,15 @@
+[     103ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:14337
+[  213386ms] [LOG] [vite] server connection lost. Polling for restart... @ http://localhost:5173/@vite/client:992
+[  218211ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:14337
+[  813596ms] [ERROR] Received NaN for the `%s` attribute. If this is expected, cast the value to a string. y1 @ http://localhost:5173/@vite/client:524
+[  813597ms] [ERROR] Received NaN for the `%s` attribute. If this is expected, cast the value to a string. y2 @ http://localhost:5173/@vite/client:524
+[  813600ms] [ERROR] Error: <line> attribute y1: Expected length, "NaN". @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:1232
+[  813600ms] [ERROR] Error: <line> attribute y2: Expected length, "NaN". @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:1232
+[  813849ms] [ERROR] Error: <line> attribute y1: Expected length, "NaN". @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:1232
+[  813849ms] [ERROR] Error: <line> attribute y2: Expected length, "NaN". @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:1232
+[  813875ms] [ERROR] Error: <line> attribute y1: Expected length, "NaN". @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:1232
+[  813875ms] [ERROR] Error: <line> attribute y2: Expected length, "NaN". @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:1232
+[ 1193766ms] [LOG] [vite] server connection lost. Polling for restart... @ http://localhost:5173/@vite/client:992
+[ 2146338ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:14337
+[ 2150541ms] [LOG] [vite] server connection lost. Polling for restart... @ http://localhost:5173/@vite/client:992
+[18502865ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=7777a0c6:14337
