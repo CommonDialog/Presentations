@@ -1,0 +1,32 @@
+{
+  "name": "@crm/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:setup": "tsx --env-file=../../.env scripts/setup-db.ts",
+    "bench": "tsx scripts/bench.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@crm/shared": "*",
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/rate-limit": "^11.2.0",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.10.0",
+    "fastify-plugin": "^6.0.0",
+    "pg": "^8.22.0",
+    "pg-boss": "^12.26.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "drizzle-kit": "^0.31.10"
+  }
+}

@@ -1,0 +1,3 @@
+CREATE INDEX "deals_account_idx" ON "deals" USING btree ("account_id");--> statement-breakpoint
+CREATE INDEX "activities_email_provider_msg_idx" ON "activities" USING btree ("organization_id",("metadata"->>'providerMessageId')) WHERE "activities"."type" = 'email';--> statement-breakpoint
+CREATE INDEX "activities_email_thread_idx" ON "activities" USING btree ("organization_id",("metadata"->>'threadKey')) WHERE "activities"."type" = 'email';

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.local
+.env
+bench-*.json
+.env.*
+!.env.example
+*.tsbuildinfo
+test-results/
+playwright-report/
