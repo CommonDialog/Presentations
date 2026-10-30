@@ -1,0 +1,59 @@
+# Google Cloud Build Pipeline:
+# 1. Vertex AI Code Review
+# 2. Vertex AI Unit Test Generation
+# 3. Run Tests & Problem Diagnosis
+# 4. Build Container & Deploy to Google Cloud Run
+
+steps:
+  - name: 'node:22'
+    id: 'vertex-ai-quality-gate'
+    entrypoint: 'bash'
+    env:
+      - 'USE_VERTEX_AI=true'
+      - 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID'
+      - 'GOOGLE_CLOUD_LOCATION=${_REGION}'
+    args:
+      - '-c'
+      - |
+        npm install
+        npm install --prefix server
+        npm install --prefix client
+        npx tsx scripts/vertex-pipeline.ts
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-container-image'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$BUILD_ID'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-container-image'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$BUILD_ID'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-to-cloud-run'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$BUILD_ID'
+      - '--region'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'USE_VERTEX_AI=true,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_CLOUD_LOCATION=${_REGION}'
+
+substitutions:
+  _SERVICE_NAME: 'aicrm'
+  _REGION: 'us-central1'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

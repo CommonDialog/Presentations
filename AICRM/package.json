@@ -1,0 +1,30 @@
+{
+  "name": "aicrm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Lead Generation & Contact Management Application",
+  "scripts": {
+    "start:windows": "powershell -ExecutionPolicy Bypass -File ./start.ps1",
+    "dev": "concurrently -n \"SERVER,CLIENT\" -c \"blue,magenta\" \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build": "npm run build --prefix server && npm run build --prefix client",
+    "start": "npm run start --prefix server",
+    "test": "npm test --prefix server",
+    "ai:review": "tsx scripts/ai-review.ts",
+    "ai:generate-tests": "tsx scripts/ai-generate-tests.ts",
+    "vertex:pipeline": "tsx scripts/vertex-pipeline.ts",
+    "vertex:deploy": "tsx scripts/vertex-pipeline.ts --deploy",
+    "predeploy": "npm run vertex:pipeline"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

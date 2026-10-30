@@ -1,0 +1,12 @@
+node_modules
+server/node_modules
+client/node_modules
+client/src
+server/src
+server/tests
+scripts
+.env
+*.tmp
+reports
+logs
+.git
